@@ -3,7 +3,7 @@ import numpy as onp
 import pandas as pd
 import jax.numpy as np
 import json
-from latentNoise_funcs_gen import *
+from funcs_LNC import *
 from processResults import *
 import bisect
 import pickle
@@ -19,124 +19,6 @@ def save_object(obj, filename):
 
 
 
-def load_dataset_old(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str):
-    # ======================
-    # GET THE DATASET
-    # ======================
-
-    """
-    1) take the job
-        (dataset_num)
-
-    2) match the number of the id to the dataset
-
-    3) load the dataset to memory
-
-    4) check it's numpy array
-
-    4) return
-    """
-    print("enter load_dataset")
-    # Read in and prepare files
-    if server == "erc":
-        repos = "/media/disk/databases/latentNoise/"
-
-    if server == "myLap":
-        repos = paste("/home/emiliano/causaLearner/data/", sep="")
-
-    # declare files and repositores
-    reposRel = (["TCEPs/" for i in range(2)] + ["ANLSMN/"])
-    #fileNms = ["TCEP-all", "SIM-1000", "ANLSMN"]
-    fileNms = ["TCEP-all", "SIM-1000_withZ", "ANLSMN_withZ"]
-    files = ["dag2-ME2-" + nm for nm in fileNms]
-    fileNames = [repos + repRel + file + "_sims.json" for (repRel, file) in zip(reposRel, files)]
-    numBlocks = [102, 400, 500]
-
-    # declare parmeters
-
-    betas = [0.1, 1.0, 10.0]
-    netas = [0.001, 0.01, 0.1]
-    etas = [0.01]
-    lams = [0.01, 0.1, 1]
-    nus = [10.0]
-    lus = [0.0, 1.0]
-    lrs = [0.1]
-    ots = ["freeZ-iniR"]  # ["freeZ-iniMani_mani-postZ", "freeZ-iniMani", "mani","freeZ"]
-
-
-    combos = {"lambda": [l for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "eta": [e for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "beta": [b for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "neta": [n for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "nu": [nu for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "lu": [lu for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "lr": [lr for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots],
-              "ot": [ot for l in lams for e in etas for b in betas for n in netas for nu in nus for lu in lus for lr in lrs for ot in ots]}
-
-
-
-    print("create datasetTab")
-    datasetTab = {"fileNms": fileNms, "fileNames": fileNames, "numJobs": numBlocks,
-                  "cumJobs_ini": [1] + list(onp.cumsum(numBlocks) + 1), "cumJobs_fin": list(onp.cumsum(numBlocks))}
-
-    aux = {"fileNms": fileNms, "fileNames": fileNames, "numJobs": numBlocks}
-    aux = pd.DataFrame.from_dict(aux)
-    datasetTab2 = {"fileNms": [f for f in fileNms for i in range(len(combos["lambda"]))],
-                   "lambda": [l for f in fileNms for l in combos["lambda"]],
-                   "eta": [e for f in fileNms for e in combos["eta"]],
-                   "beta": [b for f in fileNms for b in combos["beta"]],
-                   "neta": [n for f in fileNms for n in combos["neta"]],
-                   "nu": [nu for f in fileNms for nu in combos["nu"]],
-                   "lu": [lu for f in fileNms for lu in combos["lu"]],
-                   "lr": [lr for f in fileNms for lr in combos["lr"]],
-                   "ot": [ot for f in fileNms for ot in combos["ot"]]}
-    datasetTab2 = pd.DataFrame.from_dict(datasetTab2)
-    datasetTab2 = datasetTab2.merge(aux, on="fileNms")
-    cumJobs_ini = onp.cumsum(datasetTab2["numJobs"]) + 1
-    datasetTab2["cumJobs_ini"] = [1] + list(cumJobs_ini[0:(len(cumJobs_ini) - 1)])
-    cumJobs_fin = onp.cumsum(datasetTab2["numJobs"])
-    datasetTab2["cumJobs_fin"] = list(cumJobs_fin)
-
-    job = dataset_num
-    print(f"Starting job: {job}")
-
-
-    indx_set = bisect.bisect_left(datasetTab2["cumJobs_fin"], job)
-    indx_dataset = job - (datasetTab2["cumJobs_ini"][indx_set])
-    file = datasetTab2["fileNames"][indx_set]
-    fileNm = datasetTab2["fileNms"][indx_set]
-    lam = datasetTab2["lambda"][indx_set]
-    beta = datasetTab2["beta"][indx_set]
-    eta = datasetTab2["eta"][indx_set]
-    neta = datasetTab2["neta"][indx_set]
-    nu = datasetTab2["nu"][indx_set]
-    lu = datasetTab2["lu"][indx_set]
-    lr = datasetTab2["lr"][indx_set]
-    ot = datasetTab2["ot"][indx_set]
-    pars = {"lambda": lam, "beta": beta, "eta": eta, "neta": neta, "nu":nu,"lu":lu, "lr": lr, "optType":ot}
-
-    with open(file) as json_file:
-        data = json.load(json_file)
-    nm = list(data["xs"].keys())[indx_dataset]
-    X = data["xs"][nm]
-    X = onp.array(X)
-
-    print("set: ", datasetTab2["fileNms"][indx_set])
-    print("dataset: ", nm)
-
-    # cap data
-    maxData = 1000
-    if X.shape[0]>maxData:
-        smpl = onp.random.randint(low=1, high=X.shape[0], size=maxData)
-        X = X[smpl,:]
-
-    if (str(nm)=="8") | (str(nm)=="107") | (str(nm)=="70") & (fileNm == "TCEP-all"):
-        print("jittering")
-        X = jitter(X)
-
-    X = np.array(norml_mat(X))
-
-    return nm, X, pars  # load shit
 
 def load_dataset(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str):
     # ======================
@@ -158,7 +40,8 @@ def load_dataset(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str)
     print("enter load_dataset NEW")
     # Read in and prepare files
     if server == "erc":
-        repos = "/media/disk/databases/latentNoise/"
+        repos = "/home/emiliano/discoveringLatentConfounders/data/data_noisyproxy/"
+
 
     if server == "myLap":
         repos = "/home/emiliano/causaLearner/data/"
@@ -166,136 +49,64 @@ def load_dataset(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str)
 
     # declare parmeters
 
-  
-    pars = {"lambda": [0.001, 0.01, 0.1, 1.0],
-            "sig":[0.5],
-            "eta": [0.001],
-            "beta": [0.1, 1.0, 10.0],
-            "neta": [0.001,0.01, 0.1],
-            "nu": [10.0],
-            "lu": [0.0],
-            "lr": [0.1],
-            "ot": ["freeZ"],
-            "epchs": [500],
+    
+    pars = {"lambda": [0.01],
+            "beta": [1.0],
+            "neta": [1.0],
+            "nu": [1.0],
+            "lu": [1.0],
+            "lr": [0.001],
+            "epchs": [1000],
             "bs":[100],
-            "reps":[7]}
-
-    pars = {"lambda": [0.001, 0.01, 0.1, 1.0],
-            "sig":[0.5],
-            "eta": [0.01],
-            "beta": [0.1, 1.0, 10.0],
-            "neta": [0.1, 1.0, 10.0],
-            "nu": [10.0],
-            "lu": [0.0, 10.0],
-            "lr": [0.1],
-            "ot": ["freeZ"],
-            "epchs": [500],
-            "bs":[100],
-            "reps":[7]}
+            "reps":[1]}
     
 
-
-    fileDict = {"TCEP-all": ['tcep'],
-                "SIM-1000_withZ": ['SIM', 'SIMc', 'SIMG', 'SIMln'],
-                "ANLSMN_withZ": ['AN', 'AN-s', 'LS', 'LS-s','MN-U']}
-
-    #fileDict = {"ANLSMN_withZ": ['LS', 'LS-s','MN-U']}
-
-    #fileDict = {"SIM-1000_withZ": ['SIM'],"ANLSMN_withZ": ['LS-s','MN-U']}
-
-    #fileDict = {"TCEP-all": ['tcep']}
-
-
-    #fileDict = {"TCEP-all": ['tcep'],
-    #            "ANLSMN_withZ": ['LS-s','MN-U']}
-
-    #fileDict = {"Add2NonAdd2_withZ": ['Add2NonAdd2']}
-    #fileDict = {"Add2NonAdd_withZ": ['Add2NonAdd']}
-
-    #fileDict = {"ANLSMN_withZ": ['MN-U']}
-
-    #fileDict = {"SIM-1000_withZ": ['SIM', 'SIMc', 'SIMG', 'SIMln'],
-    #            "ANLSMN_withZ": ['AN', 'AN-s', 'LS']}
-
-
-    datasetTab, data = getDataSetTab(repos, pars, fileDict, func_dict)
-    
-    
+    datasetTab = getDataSetTab(repos, pars)
+    print("datasetTab shape: ", datasetTab.shape)
    
     job = dataset_num
     print(f"Starting job: {job}")
 
 
-    indx_set = bisect.bisect_left(datasetTab["cumJobs_fin"], job)
-    set = datasetTab["fileNms"][indx_set]
-    indxSet = list(onp.where([setDt == set for setDt in list(fileDict.keys())]))[0][0]
-    indx_dataset = job - (datasetTab["cumJobs_ini"][indx_set])
-    file = datasetTab["fileNames"][indx_set]
-    fileNm = datasetTab["fileNms"][indx_set]
+    indx_set = job
+    file = datasetTab["fileName"][indx_set]
     lam = datasetTab["lambda"][indx_set]
-    sig = datasetTab["sig"][indx_set]
     beta = datasetTab["beta"][indx_set]
-    eta = datasetTab["eta"][indx_set]
     neta = datasetTab["neta"][indx_set]
     nu = datasetTab["nu"][indx_set]
     lu = datasetTab["lu"][indx_set]
     lr = datasetTab["lr"][indx_set]
-    ot = datasetTab["ot"][indx_set]
     epchs = datasetTab["epchs"][indx_set]
     bs = datasetTab["bs"][indx_set]
     reps = datasetTab["reps"][indx_set]
-    pars = {"lambda": lam,"sig":sig, "beta": beta, "eta": eta, "neta": neta, "nu":nu,"lu":lu, "lr": lr, "optType":ot, "epchs":epchs, "bs":bs, "reps":reps}
+    pars = {"lambda": lam, "beta": beta, "neta": neta, "nu":nu,"lu":lu, "lr": lr, "epchs":epchs, "bs":bs, "reps":reps}
 
-    #with open(file) as json_file:
-    #    data = json.load(json_file)
-    data = data[indxSet]
-    nm = list(data.keys())[indx_dataset]
-    X = data[nm]
-    X = onp.array(X)
+    x, y, Z, U, meta, idxs, beta_real, stds = readFile(repos, file)
+    
+    nm = file.split(".")[0]
+    
 
+    dataInfo = {"dataset":nm}
 
-
-
-
-    dataInfo = {"type":fileNm, "dataset":nm}
-
-    print("set: ", datasetTab["fileNms"][indx_set])
     print("dataset: ", nm)
 
-    # cap data
-    maxData = 1000
-    if X.shape[0]>maxData:
-        onp.random.seed(seed=job+4)
-        smpl = onp.random.randint(low=1, high=X.shape[0], size=maxData)
-        X = X[smpl,:]
-	
-    X = norml_mat(X)
-
-    if ((str(nm)=="8") | (str(nm)=="107") | (str(nm)=="70")) & (fileNm == "TCEP-all"):
-    #if ((str(nm)=="8") | (str(nm)=="107") | (str(nm)=="70") | (str(nm)=="87")) & (fileNm == "TCEP-all"):
-    #if ((str(nm)=="8") | (str(nm)=="107") | (str(nm)=="70") | (str(nm)=="87") | (str(nm)=="27") | (str(nm)=="47")) & (fileNm == "TCEP-all"):
-    #if (fileNm == "TCEP-all"):
-        print("jittering")
-        X = jitter(X)
-        #X = onp.apply_along_axis(jitterByDist, 0, X)
-
-    X = np.array(norml_mat(X))
-
-    return nm, X, pars, dataInfo  # load shit
+    
+    return nm, x, y, Z, U, meta, idxs, beta_real, stds, pars, dataInfo  # load shit
 
 def main(args):
 
     job = int(args.job) + int(args.offset)
     # load dataset from job array id
     print("load")
-    nm, data, pars, dataInfo = load_dataset(dataset_num=job, server=args.server)
+    nm, x, y, Z, U, meta, idxs, beta_real, stds, pars, dataInfo = load_dataset(dataset_num=job, server=args.server)
     print("nm: ", nm)
-    print("shape data", data.shape)
+    print("meta: ", meta)
+    print("U shape data", U.shape)
     print("pars: ", pars)
+    
 
-
-    N = data.shape[0]
-    maxMonitor = 1000
+    N = x.shape[0]
+    maxMonitor = 5000
     parts = int(onp.ceil(N/maxMonitor))
     print("parts: ", parts)
     
@@ -305,13 +116,10 @@ def main(args):
     print("getLatenZs etc")
     beta = np.array([pars["beta"]])
     neta = np.array([pars["neta"]])
-    eta = np.array([pars["eta"]])
     lam = np.array([pars["lambda"]])
-    sig = np.array([pars["sig"]])
     nu = np.array([pars["nu"]])
     lu = np.array([pars["lu"]])
     lr = float(pars["lr"])
-    optType = str(pars["optType"])
     epchs = int(pars["epchs"])
     bs = int(pars["bs"])
     reps = int(pars["reps"])
@@ -328,26 +136,23 @@ def main(args):
     print("save")
 
     if args.server == "erc":
-        reposResults = "/home/emiliano/latentnoise_krr/results/"
+        reposResults = "/home/emiliano/discoveringLatentConfounders/results/"
 
     if args.server == "myLap":
         reposResults = "/home/emiliano/ISP/proyectos/latentNoise_krr/results/"
 
 
     #save_shit(results, name=f"{args.save}_results_{args.job}.json")
-    fileRes = reposResults+"latent_noise"+str(job)+".pkl"
+    fileRes = reposResults+"LNC"+str(job)+".pkl"
     #with open(fileRes, 'w') as outfile:
     #    json.dump(results, outfile)
     
     pars = {"lambda": lam,
-            "sig":sig,
-            "eta": eta,
             "beta": beta,
             "neta": neta,
             "nu": nu,
             "lu": lu,
             "lr": lr,
-            "ot": optType,
             "epchs": epochs2,
             "bs":batch_size2,
             "reps":reps}
@@ -358,6 +163,7 @@ def main(args):
         results = pickle.load( open( fileRes, "rb" ) )
         results["pars"] = pars
         results["dataInfo"] = dataInfo
+        results["meta"] = meta
         print(results)
     	# sample usage
         save_object(results, fileRes)
@@ -366,6 +172,7 @@ def main(args):
         results = main_experiment(data, beta, neta, eta, lam,sig, nu, lu, lr, nm, optType, epochs2, batch_size2, reps, job)
         results["pars"] = pars
         results["dataInfo"] = dataInfo
+	results["meta"] = meta
         #print(results)
     	# sample usage
         save_object(results, fileRes)

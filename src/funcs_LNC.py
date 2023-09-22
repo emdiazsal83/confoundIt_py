@@ -176,7 +176,7 @@ def mse(y, y_hat):
 @jax.jit
 def getDataLoss_LNC(smpl, loss_data):
     
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real = loss_data 
+    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data 
     
     
 
@@ -201,14 +201,14 @@ def getDataLoss_LNC(smpl, loss_data):
         Z_aux = None
         
             
-    return x_aux, y_aux, Z_aux, K_u_aux, D_x_aux, K_y_aux, None, K_x, idxs, beta_real
+    return x_aux, y_aux, Z_aux, K_u_aux, D_x_aux, K_y_aux, None, K_x, idxs, beta_real, stds
 
 
 def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     
     
     _, _, lam, _ , _ = pars 
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real = loss_data
+    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data
     
     n = x.shape[0]
     
@@ -304,7 +304,8 @@ def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     
     
 
-    qs = [0.3, 0.9]
+    #qs = [0.3, 0.9]
+    qs = [0.5]
     indxs = np.arange(len(qs)).tolist()
     indxs = [[i, j, k] for i in indxs for j in indxs for k in indxs]
     indxs = np.array(indxs).T.tolist()
@@ -379,7 +380,7 @@ def loss_LNC(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
     beta, neta, lam, nu, lu = pars 
     
     
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real = loss_data
+    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data
     
     zxc = K_u@alpha_x
     zyc = K_u@alpha_y
@@ -502,7 +503,7 @@ dloss_LNC_jitted = jax.jit(dloss_LNC)
 @jax.jit
 def model_LNC(params, lam, loss_data, K_t):
 
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real = loss_data
+    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data
 
     alpha_x = params["alpha_x"]
     alpha_y = params["alpha_y"]
@@ -544,6 +545,12 @@ def model_LNC(params, lam, loss_data, K_t):
     _, beta_x, _, _ = krrModel_lin(lam, K_x, x, y, ws)
     weights_x, resids_x, x_hat = krrModel(lam, K_ax_f, x, ws)
     
+    x_std, y_std = stds
+
+    beta = beta/x_std*y_std
+    beta_x = beta_x/x_std*y_std
+    beta_u = beta_u/x_std*y_std
+
     bias_beta = np.abs(beta_real-beta)
     bias_beta_u = np.abs(beta_real-beta_u)
     bias_beta_x = np.abs(beta_real-beta_x)
@@ -967,7 +974,7 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
             	
 
  
-            if (iteration % report_freq == 0):# & (iteration != 0):
+            if (iteration % report_freq == 0) & (iteration != 0):
                 #print("report")
                 print("iteration report: ", iteration)
                 
@@ -1001,7 +1008,7 @@ def get_batches_one_epoch(batch_per_epoch, batch_size, n):
     return batches_one_epoch
 
 
-def getLatentZ_wrapper(x, y, Z, U, idxs, beta_real, nm, pars, num_epochs, report_freq, num_reps, batch_size, learning_rate, job):
+def getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, report_freq, num_reps, batch_size, learning_rate, job):
     print("nm:", nm)
     N = x.shape[0]
     
@@ -1028,7 +1035,7 @@ def getLatentZ_wrapper(x, y, Z, U, idxs, beta_real, nm, pars, num_epochs, report
 
     smplsParts = [myWhere(smplsParts==i) for i in range(parts)]
 
-    lossData = x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real 
+    lossData = x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds 
     
     
 
