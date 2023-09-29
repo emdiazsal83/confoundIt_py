@@ -1,9 +1,12 @@
 from typing import Dict
 import numpy as onp
 import pandas as pd
+import sys
+print(sys.version)
 import jax.numpy as np
 import json
 from funcs_LNC import *
+from funcs_LNC_lin import *
 from processResults import *
 import bisect
 import pickle
@@ -40,7 +43,8 @@ def load_dataset(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str)
     print("enter load_dataset NEW")
     # Read in and prepare files
     if server == "erc":
-        repos = "/home/emiliano/discoveringLatentConfounders/data/data_noisyproxy/"
+        repos = "/home/emiliano/discoveringLatentConfounders/data/data_noisyproxy2/"
+        
 
 
     if server == "myLap":
@@ -54,9 +58,9 @@ def load_dataset(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str)
             "beta": [1.0],
             "neta": [1.0],
             "nu": [1.0],
-            "lu": [1.0],
+            "lu": [0.0],
             "lr": [0.001],
-            "epchs": [1000],
+            "epchs": [3000],
             "bs":[100],
             "reps":[1]}
     
@@ -68,8 +72,8 @@ def load_dataset(dataset_num: int = 0, server: str="myLap") -> (np.ndarray, str)
     print(f"Starting job: {job}")
 
 
-    indx_set = job
-    file = datasetTab["fileName"][indx_set]
+    indx_set = job - 1
+    file = datasetTab["fileNames"][indx_set]
     lam = datasetTab["lambda"][indx_set]
     beta = datasetTab["beta"][indx_set]
     neta = datasetTab["neta"][indx_set]
@@ -126,7 +130,7 @@ def main(args):
 
     
     #batch_size2 = int(onp.floor(onp.min([onp.max([30, bs/1000*N]), 300])))
-    batch_size2 = int(onp.floor(onp.min([onp.max([90, bs/1000*N]), 300])))
+    batch_size2 = int(onp.floor(onp.min([onp.max([25, bs/1000*N]), 300])))
     epochs2 = int(onp.max([onp.ceil((50*N)/batch_size2), 500]))
     print("epochs2: ", epochs2)
     print("batch_size2: ", batch_size2)
@@ -143,7 +147,7 @@ def main(args):
 
 
     #save_shit(results, name=f"{args.save}_results_{args.job}.json")
-    fileRes = reposResults+"LNC"+str(job)+".pkl"
+    fileRes = reposResults+"LNC_"+str(job)+".pkl"
     #with open(fileRes, 'w') as outfile:
     #    json.dump(results, outfile)
     
@@ -153,7 +157,7 @@ def main(args):
             "nu": nu,
             "lu": lu,
             "lr": lr,
-            "epchs": epochs2,
+            "epchs": epchs,
             "bs":batch_size2,
             "reps":reps}
 
@@ -169,10 +173,11 @@ def main(args):
         save_object(results, fileRes)
     else:
         print("File not exist")
-        results = main_experiment(data, beta, neta, eta, lam,sig, nu, lu, lr, nm, optType, epochs2, batch_size2, reps, job)
+        #results = main_experiment(x, y, Z, U, idxs, beta_real, stds, beta, neta, lam, nu, lu,lr, nm, epochs2, batch_size2, reps, job)
+        results = main_experiment(x, y, Z, U, idxs, beta_real, stds, beta, neta, lam, nu, lu,lr, nm, epchs, batch_size2, reps, job)
         results["pars"] = pars
         results["dataInfo"] = dataInfo
-	results["meta"] = meta
+        results["meta"] = meta
         #print(results)
     	# sample usage
         save_object(results, fileRes)

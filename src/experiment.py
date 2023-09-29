@@ -2,6 +2,7 @@ from typing import Dict
 import numpy as onp
 import jax.numpy as np
 from funcs_LNC import *
+from funcs_LNC_lin import *
 from processResults import *
 import json
 import sys
@@ -20,7 +21,7 @@ def main_experiment(x: np.ndarray, y: np.ndarray, Z: np.ndarray, U: np.ndarray, 
     pars = (beta, neta,lam,nu, lu)
 
     start = time.process_time()
-    res = getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, name, pars, epchs, epchs, reps, bs, lr, job)
+    res = getLatentZ_wrapper_lin(x, y, Z, U, idxs, stds, beta_real, name, pars, epchs, epchs, reps, bs, lr, job)
     print(time.process_time() - start)  #
 
     
@@ -99,7 +100,7 @@ if __name__ == "__main__":
     
     # run experiment
     results = main_experiment(x, y, Z, U, idxs, beta_real, stds, beta, neta, lam, nu, lu,lr, nm, epchs, bs, reps, job)
-    print(results)
+    print(results["Z"])
     print("finished")
     # save to somewhere
     # save_shit

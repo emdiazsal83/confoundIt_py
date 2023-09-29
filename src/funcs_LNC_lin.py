@@ -1,4 +1,6 @@
 from sklearn.manifold import Isomap
+from sklearn.decomposition import FastICA
+import statsmodels.api as sm
 import sys
 from typing import Tuple, Optional, Dict, Callable, Union
 
@@ -15,7 +17,7 @@ from jax.scipy import linalg
 from jax.scipy.stats import norm
 from jax import grad, value_and_grad
 from jax.experimental import optimizers as jax_opt
-
+from funcs_LNC import *
 
 # NUMPY SETTINGS
 import numpy as onp
@@ -32,83 +34,17 @@ logging.basicConfig(
 logger = logging.getLogger()
 #logger.setLevel(logging.INFO)
 
-def myWhere(x):
-       res,  = onp.where(x)
-       return res
-
-def norml(x):
-    return (x-onp.min(x))/(onp.max(x)-onp.min(x))-0.5
-def norml_mat(x):
-    return onp.apply_along_axis(norml,0,x)
-
 @jax.jit
-def normalize(m):
-    o = np.argsort(m)
-    mp = np.argsort(o)
-    #sns.distplot(mp)
-    min_mp = np.min(mp)-0.001
-    max_mp = np.max(mp)+0.001
-    mpp = (mp-min_mp)/(max_mp-min_mp)
-    #sns.distplot(mpp)
-    #print(np.min(mpp), np.max(mpp))
-    mppp = ndtri(mpp)
-    return(mppp)
-
-def stdrze(x):
-    return (x-onp.mean(x))/onp.std(x)
-def stdrze_mat(x):
-    return onp.apply_along_axis(stdrze,0,x)
-
-
-@jax.jit
-def corrcoef(x, y):
-    x_stdr = (x-np.mean(x))/np.std(x)
-    y_stdr = (y-np.mean(y))/np.std(y)
-    res = (np.dot(x_stdr.T,y_stdr)/x_stdr.shape[0])
-    #print("corrcoef",res.shape)
-    return res[0]
-
-# Squared Euclidean Distance Formula
-@jax.jit
-def sqeuclidean_distance(x, y):
-    return np.sum((x - y) ** 2)
-
-
-# RBF Kernel
-@jax.jit
-def rbf_kernel(params, x, y):
-    return np.exp(- params['gamma'] * sqeuclidean_distance(x, y))
-
-
-# Covariance Matrix
-def covariance_matrix(kernel_func, x, y):
-    mapx1 = jax.vmap(
-        lambda x, y: kernel_func(x, y), in_axes=(0, None), out_axes=0)
-    mapx2 = jax.vmap(
-        lambda x, y: mapx1(x, y), in_axes=(None, 0), out_axes=1)
-    return mapx2(x, y)
-
-
-# Covariance Matrix
-def rbf_kernel_matrix(params, x, y):
-    mapx1 = jax.vmap(lambda x, y: rbf_kernel(params, x, y), in_axes=(0, None), out_axes=0)
-    mapx2 = jax.vmap(lambda x, y: mapx1(x, y), in_axes=(None, 0), out_axes=1)
-    return mapx2(x, y)
-
-@jax.jit
-def krrModel(lam, K, y, ws):
-    # cho factor the cholesky
-    # L = linalg.cho_factor(K + lam * np.eye(K.shape[0]))
-    #L = linalg.cho_factor(K + lam * np.diag(1 / ws))
-    #n = K.shape[0]
-    L = linalg.cho_factor(K + lam * np.diag(1 / ws))
+def rrModel(lam, X, y, ws):
+    
+    L = linalg.cho_factor(np.dot(X.T,X) + lam * np.diag(1 / ws))
 
     # weights
-    weights = linalg.cho_solve(L, y)
+    weights = linalg.cho_solve(L, np.dot(X.T,y))
 
     # save the params
 
-    y_hat = np.dot(K, weights)
+    y_hat = np.dot(X, weights)
 
     resids = y - y_hat
 
@@ -116,80 +52,46 @@ def krrModel(lam, K, y, ws):
     return weights, resids, y_hat
 
 @jax.jit
-def krrModel_lin(lam, K, x, y, ws):
-    # cho factor the cholesky
-    
-    I = np.diag(1 / ws)
-    B1 = linalg.inv(K + lam * I)
-    B2 = I + np.dot(K, B1)
-    beta_num = np.dot(np.dot(x.T, B2), y)
-    beta_den= lam + np.dot(np.dot(x.T, B2), x)
-    beta = beta_num / beta_den
-    
+def linRegCoefStat(lam, X, y, ws):
+
+    invMat = np.linalg.inv(np.dot(X.T, X)+ lam * np.diag(1 / ws))
+    #L = linalg.cho_factor(np.dot(X.T,X) + lam * np.diag(1 / ws))
+
     # weights
-    #weights = linalg.cho_solve(L, y-x*beta)
-    weights = np.dot(B1, y-x*beta)
+    #weights = linalg.cho_solve(L, np.dot(X.T,y))
+    weights = np.dot(invMat, np.dot(X.T,y))
 
     # save the params
 
-    y_hat = np.dot(K, weights) + beta*x
+    y_hat = np.dot(X, weights)
 
     resids = y - y_hat
+    mses = mse(y, y_hat)
 
-    # return the predictions
-    return weights, beta, resids, y_hat
-
-@jax.jit
-def centering(K):
-    n_samples = K.shape[0]
-    logging.debug(f"N: {n_samples}")
-    logging.debug(f"I: {np.ones((n_samples, n_samples)).shape}")
-    H = np.eye(K.shape[0], ) - (1 / n_samples) * np.ones((n_samples, n_samples))
-    return np.dot(np.dot(H, K), H)
-
-
-# Normalized Hsic - from kernels
-@jax.jit
-def hsic(K_x, K_z):
-    K_x = centering(K_x)
-    K_z = centering(K_z)
-    return np.sum(K_x * K_z) / np.linalg.norm(K_x) / np.linalg.norm(K_z)
-
-# Normalized Hsic - from features using rbf kernels
-@jax.jit
-def hsicRBF(x, z):
-    distsX = covariance_matrix(sqeuclidean_distance, x, x)
-    sigma = 1 / np.median(distsX)
-    K_x = rbf_kernel_matrix({'gamma': sigma}, x, x)
-    distsZ = covariance_matrix(sqeuclidean_distance, z, z)
-    sigma = 1 / np.median(distsZ)
-    K_z = rbf_kernel_matrix({'gamma': sigma}, z, z)
-    K_x = centering(K_x)
-    K_z = centering(K_z)
-    return np.sum(K_x * K_z) / np.linalg.norm(K_x) / np.linalg.norm(K_z)
-
-@jax.jit
-def mse(y, y_hat):
-    return np.sqrt(np.mean((y - y_hat) ** 2))
-
-
-@jax.jit
-def getDataLoss_LNC(smpl, loss_data):
+    var_b = mses*(invMat).diagonal()
+    sd_b = np.sqrt(var_b)
     
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data 
+    ts_b = weights[:,0] / sd_b
+    return ts_b
+
+
+@jax.jit
+def getDataLoss_LNC_lin(smpl, loss_data):
     
-    
+     
+    x, y, Z, U, U_ica,  K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds, idx_min, idx_x_c, idx_y_c, mixMat = loss_data    
 
     D_x_aux = D_x[smpl, :]
     D_x_aux = D_x_aux[:, smpl]
     K_x_aux = K_x[smpl, :]
     K_x_aux = K_x_aux[:, smpl]
-    #K_zmani_aux = K_zmani[smpl,:]
-    #K_zmani_aux = K_zmani_aux[:,smpl]
     K_y_aux = K_y[smpl,:]
     K_y_aux = K_y_aux[:,smpl]
     K_u_aux = K_u[smpl,:]
-    #K_u_aux = K_u_aux[:,smpl]
+
+    U_aux = U[smpl,:]
+    U_ica_aux = U_ica[smpl,:]
+    
                 
     x_aux = x[smpl,]
     y_aux = y[smpl,]
@@ -200,15 +102,14 @@ def getDataLoss_LNC(smpl, loss_data):
     else:
         Z_aux = None
         
-            
-    return x_aux, y_aux, Z_aux, K_u_aux, D_x_aux, K_y_aux, None, K_x, idxs, beta_real, stds
+           
+    return x_aux, y_aux, Z_aux, U_aux, U_ica_aux, K_u_aux, D_x_aux, K_y_aux, None, K_x, idxs, beta_real, stds, idx_min, idx_x_c, idx_y_c, mixMat
 
-
-def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
+def getIniPar_LNC_lin(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     
     
     _, _, lam, _ , _ = pars 
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data
+    x, y, Z, U, U_ica,  K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds, idx_min, idx_x_c, idx_y_c, mixMat = loss_data
     
     n = x.shape[0]
     
@@ -217,53 +118,59 @@ def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     # we actually have to initialize alpha_x, alpha_y and alpha_c so in each case
     # we have to work out what z = U*alpha -> cholesky decomposition of U
     
-    zx_ini = x
-    zy_ini = y 
-    
-    embedding = Isomap(n_components=10)
+    #zx_ini = x
+    #zy_ini = y 
     xy = onp.hstack([x, y])
-    xy_transformed = embedding.fit_transform(xy)
-    zc_ini = np.array(xy_transformed[:,3])[:,None]
+    
+    #embedding = Isomap(n_components=10)
+    #xy_transformed = embedding.fit_transform(xy)
+    #zc_ini = np.array(xy_transformed[:,3])[:,None]
     
     
-    #L = linalg.cho_factor(np.dot(U.T, U) + 0.0001 * np.eye(m))
-    #alpha_x = linalg.cho_solve(L, np.dot(U.T, zx_ini))
-    #alpha_y = linalg.cho_solve(L, np.dot(U.T, zy_ini))
-    #alpha_c = linalg.cho_solve(L, np.dot(U.T, zc_ini))
+    zc_ini = np.array(U_ica[:,idx_min][:,None])
+    p_ica = U_ica.shape[1]
+
+    alpha_x_ini = onp.zeros((p_ica, p_ica))
+    alpha_x_ini[idx_x_c, idx_x_c] = 1
+    alpha_x_ini = alpha_x_ini[:,idx_x_c]
+    alpha_x_ini = np.array(alpha_x_ini)
     
-    
-    ws = np.ones(n)
-    alpha_x, _, _ = krrModel(lam, K_u, zx_ini, ws)
-    alpha_x = alpha_x * np.ones(reps)
-    alpha_y, _, _ = krrModel(lam, K_u, zy_ini, ws)
-    alpha_y = alpha_y * np.ones(reps)
-    alpha_c, _, _ = krrModel(lam, K_u, zc_ini, ws)
-    alpha_c = alpha_c * np.ones(reps)
-    
-    #alpha_x = onp.random.normal(size=(n,reps))#[:,None]
-    #alpha_y = onp.random.normal(size=(n,reps))#[:,None]
-    #alpha_c = onp.random.normal(size=(n,reps))#[:,None]
+    alpha_y_ini = onp.zeros((p_ica, p_ica))
+    alpha_y_ini[idx_y_c, idx_y_c] = 1
+    alpha_y_ini = alpha_y_ini[:,idx_y_c]
+    alpha_y_ini = np.array(alpha_y_ini)
+
+
+    zx_ini = (U_ica@alpha_x_ini)
+    zy_ini = (U_ica@alpha_y_ini)
+
+    p = U.shape[1]
+    L = linalg.cho_factor(np.dot(U.T, U) + lam * np.eye(p))
+    #alpha_x_ini = linalg.cho_solve(L, np.dot(U.T, zx_ini))
+    #alpha_y_ini = linalg.cho_solve(L, np.dot(U.T, zy_ini))
+    alpha_c_ini = linalg.cho_solve(L, np.dot(U.T, zc_ini))
     
     
     params = {
-            'alpha_x': alpha_x,
-            'alpha_y': alpha_y,
-            'alpha_c': alpha_c,
+            'alpha_x': alpha_x_ini,
+            'alpha_y': alpha_y_ini,
+            'alpha_c': alpha_c_ini,
     }
     
     #onp.random.seed(seed=4)
     
-    zx_ini = np.array(onp.apply_along_axis(normalize, 0, zx_ini))
-    zy_ini = np.array(onp.apply_along_axis(normalize, 0, zy_ini))
-    zc_ini = np.array(onp.apply_along_axis(normalize, 0, zc_ini))
+    #zx_ini = (zx_ini - np.mean(zx_ini)) / (np.std(zx_ini))
+    #zy_ini = (zy_ini - np.mean(zy_ini)) / (np.std(zy_ini))
+    #zc_ini = (zc_ini - np.mean(zc_ini)) / (np.std(zc_ini))
+    zx_ini = np.array(onp.apply_along_axis(stdrze, 0, zx_ini))
+    zy_ini = np.array(onp.apply_along_axis(stdrze, 0, zy_ini))
+    zc_ini = np.array(onp.apply_along_axis(stdrze, 0, zc_ini))
     
 
-    
     sigma_x_med = 1 / np.median(D_x)
     sigma_y = 1 / np.median(D_y)
     
 
-    
     D_zx = covariance_matrix(sqeuclidean_distance, zx_ini, zx_ini)
     sigma_zx_med = 1 / np.median(D_zx)
     
@@ -302,29 +209,8 @@ def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     distsRy = covariance_matrix(sqeuclidean_distance, resids_y, resids_y)
     sigma_ry_med = 1 / np.quantile(distsRy, 0.5)
     
-    
 
-    #qs = [0.3, 0.9]
-    qs = [0.5]
-    indxs = np.arange(len(qs)).tolist()
-    indxs = [[i, j, k] for i in indxs for j in indxs for k in indxs]
-    indxs = np.array(indxs).T.tolist()
-    qs_zx_f = np.array(qs)[np.array(indxs[0])]
-    qs_zy_f = np.array(qs)[np.array(indxs[1])]
-    qs_zc_f = np.array(qs)[np.array(indxs[2])]
-    #qs_zx_f = np.array([0.3])
-    #qs_zy_f = np.array([0.3])
-    #qs_zc_f = np.array([0.9])
-    print("qs_zx_f: ", qs_zx_f)
-    print("qs_zy_f: ", qs_zy_f)
-    print("qs_zc_f: ", qs_zc_f)
     
-    sigs_zx_f= 1/np.quantile(D_zx, qs_zx_f)
-    sigs_zy_f= 1/np.quantile(D_zy, qs_zy_f)
-    sigs_zc_f= 1/np.quantile(D_zc, qs_zc_f)
-    
-    
-    sigs_x_f= sigma_x_med * np.ones(reps)
     
     sigs_zx_h= sigma_zx_med * np.ones(reps)
     sigs_zy_h= sigma_zy_med * np.ones(reps)
@@ -333,10 +219,6 @@ def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     sigs_rx_h= sigma_rx_med * np.ones(reps)
     sigs_ry_h= sigma_rx_med * np.ones(reps)
     
-    params['ln_sig_zx_f']= np.log(sigs_zx_f)
-    params['ln_sig_zy_f']= np.log(sigs_zy_f)
-    params['ln_sig_zc_f']= np.log(sigs_zc_f)
-    params['ln_sig_x_f']= np.log(sigs_x_f)
     
     params['ln_sig_zx_h']= np.log(sigs_zx_h)
     params['ln_sig_zy_h']= np.log(sigs_zy_h)
@@ -349,61 +231,163 @@ def getIniPar_LNC(reps, loss_data, pars, smplsParts): #N, m, reps, y, M
     return params
 
 @jax.jit
-def kernel_mat_LNC(D_x, x, zx, zy, zc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h, sigs_f):
-    # sigs_f = np.hstack([sig_x_f, sig_zx_f, sig_zy_f, sig_zc_f])
-    sig_x_f = sigs_f[0]
-    sig_zx_f = sigs_f[1]
-    sig_zy_f = sigs_f[2]
-    sig_zc_f = sigs_f[3]
-    
-    K_x_f = np.exp(-sig_x_f * D_x)
-    K_zx_f = rbf_kernel_matrix({'gamma': sig_zx_f}, zx, zx)
-    K_zy_f = rbf_kernel_matrix({'gamma': sig_zy_f}, zy, zy)
-    K_zc_f = rbf_kernel_matrix({'gamma': sig_zc_f}, zc, zc)
+def getParamsForGrad_LNC_lin(params, rep, smpl):
+  
+    ln_sig_x_h = params["ln_sig_x_h"][rep]
+    ln_sig_zx_h = params["ln_sig_zx_h"][rep]
+    ln_sig_zy_h = params["ln_sig_zy_h"][rep]
+    ln_sig_zc_h = params["ln_sig_zc_h"][rep]
+    ln_sig_rx_h = params["ln_sig_rx_h"][rep]
+    ln_sig_ry_h = params["ln_sig_ry_h"][rep]
     
 
-    K_x_h = K_x_f #np.exp(-sig_x_h * D_x)
-    K_zx_h = K_zx_f #rbf_kernel_matrix({'gamma': sig_z_h}, z, z)
-    K_zy_h = K_zy_f #rbf_kernel_matrix({'gamma': sig_z_h}, z, z)
-    K_zc_h = K_zc_f #rbf_kernel_matrix({'gamma': sig_z_h}, z, z)
+    params_aux = params.copy()
+
+    #alpha_x = params["alpha_x"]#[:, rep]
+    #alpha_y = params["alpha_y"]#[:, rep]
+    #alpha_c = params["alpha_c"]#[:, rep]
+    #alpha_x = alpha_x[:,None]
+    #alpha_y = alpha_y[:,None]
+    #alpha_c = alpha_c[:,None]
+    
+    
+    #params_aux['alpha_x'] = alpha_x
+    #params_aux['alpha_y'] = alpha_y
+    #params_aux['alpha_c'] = alpha_c
+    
+    params_aux["ln_sig_x_h"] = ln_sig_x_h
+    params_aux["ln_sig_zx_h"] = ln_sig_zx_h
+    params_aux["ln_sig_zy_h"] = ln_sig_zy_h
+    params_aux["ln_sig_zc_h"] = ln_sig_zc_h
+    params_aux["ln_sig_rx_h"] = ln_sig_rx_h
+    params_aux["ln_sig_ry_h"] = ln_sig_ry_h
+    
+
+    return params_aux
+
+def updateParams_LNC_lin(params, grad_params, smpl, iteration, rep, learning_rate):
+     
+    #alpha_x
+    #idx_rows = smpl[:, None]
+    p = params['alpha_x'].shape[0]
+    idx_rows = np.linspace(0, p - 1, p, dtype=int)[:, None]
+    idx_cols = np.linspace(0, p - 1, p, dtype=int)[:, None] 
+    #idx_cols = np.array(rep)[None, None]
+    idx = jax.ops.index[tuple([idx_rows, idx_cols])]
+    A = params['alpha_x']#[tuple([idx_rows, idx_cols])]
+    B = learning_rate * grad_params['alpha_x']
+    #params['alpha_x'] = index_update(params['alpha_x'], idx, A - B)
+    #params['alpha_x'] = A - B
+    
+    #alpha_y
+    p = params['alpha_y'].shape[0]
+    idx_rows = np.linspace(0, p - 1, p, dtype=int)[:, None]
+    idx_cols = np.linspace(0, p - 1, p, dtype=int)[:, None]
+    idx = jax.ops.index[tuple([idx_rows, idx_cols])]
+    A = params['alpha_y']#[tuple([idx_rows, idx_cols])]
+    B = learning_rate * grad_params['alpha_y']
+    #params['alpha_y'] = index_update(params['alpha_y'], idx, A - B)
+    #params['alpha_y'] = A - B
+    
+    #alpha_c
+    p = params['alpha_y'].shape[0]
+    idx_rows = np.linspace(0, p - 1, p, dtype=int)[:, None]
+    idx_cols = np.linspace(0, 1 - 1, 1, dtype=int)[:, None]
+    idx = jax.ops.index[tuple([idx_rows, idx_cols])]
+
+    A = params['alpha_c']#[tuple([idx_rows, idx_cols])]
+    B = learning_rate * grad_params['alpha_c']
+    #params['alpha_c'] = index_update(params['alpha_c'], idx, A - B)
+    params['alpha_c'] = A - B
+    
+
+    gpars = [grad_params["ln_sig_x_h"],
+    grad_params["ln_sig_zx_h"],
+    grad_params["ln_sig_zy_h"],
+    grad_params["ln_sig_zc_h"],
+    grad_params["ln_sig_rx_h"],
+    grad_params["ln_sig_ry_h"],
+    grad_params["ln_sig_x_h"],
+    grad_params["ln_sig_zx_h"],
+    grad_params["ln_sig_zy_h"],
+    grad_params["ln_sig_zc_h"],
+    grad_params["ln_sig_rx_h"],
+    grad_params["ln_sig_ry_h"]]
+    
+
+    if (onp.sum(onp.isnan(B))!=0) | (onp.sum(onp.isinf(B))!=0) | (onp.sum(onp.isnan(gpars))!=0):
+        idx_nan, _ = onp.where(onp.isnan(B))
+        print("nans in grad Z, iteration: ", iteration, " rep: ", rep)
+        raise ValueError('Nans in gradient.')
+            
+    
+    
+    return None
+
+@jax.jit
+def kernel_mat_LNC_lin(D_x, x, zx, zy, zc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h):
+    
+    
+    K_x_h = np.exp(-sig_x_h * D_x)
+    
+    K_zx_h = rbf_kernel_matrix({'gamma': sig_zx_h}, zx, zx)
+    K_zy_h = rbf_kernel_matrix({'gamma': sig_zy_h}, zy, zy)
+    K_zc_h = rbf_kernel_matrix({'gamma': sig_zc_h}, zc, zc)
+    
+
     # x causes - to compare to rx
-    K_ax_h = K_zx_h+K_zc_h
+    K_ax_h = K_zx_h*K_zc_h
     # y causes - to compare to ry
-    K_ay_h = K_x_h+K_zy_h+K_zc_h
-    #K_a_f = 2 * K_x_f + 2 * K_z_f + K_xz_f + K_zx_f
-    K_ax_f = K_zc_h#+K_zx_f
-    K_ay_f = K_zc_h#+K_zy_h
-
-    return K_ax_f, K_ay_f, K_ax_h, K_ay_h, K_x_h, K_zx_h, K_zy_h, K_zc_h
+    K_ay_h = K_x_h*K_zy_h*K_zc_h
+    
+    return K_ax_h, K_ay_h, K_x_h, K_zx_h, K_zy_h, K_zc_h
 
 # loss 
 @jax.jit
-def loss_LNC(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
+def loss_LNC_lin(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
     
     beta, neta, lam, nu, lu = pars 
     
     
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data
     
-    zxc = K_u@alpha_x
-    zyc = K_u@alpha_y
-    zcc = K_u@alpha_c
+    x, y, Z, U, U_ica,  K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds, idx_min, idx_x_c, idx_y_c, mixMat = loss_data    
+
+    zxc = U_ica@alpha_x
+    zyc = U_ica@alpha_y
+    zcc = U@alpha_c
     
     alpha_x = params["alpha_x"]
     alpha_y = params["alpha_y"]
     alpha_c = params["alpha_c"]
+
+    alphap_x = mixMat@alpha_x
+    alphap_y = mixMat@alpha_y
+
     
-    zx = K_u@alpha_x
-    zy = K_u@alpha_y
-    zc = K_u@alpha_c
+    px = alpha_x.shape[1]
+    py = alpha_y.shape[1]
+    p = alpha_c.shape[0]
+    one_p = np.ones(p)[:,None]
+    one_px = np.ones(px)[:,None]
+    one_py = np.ones(py)[:,None] 
+    weight_orth = (one_px.T@alphap_x.T@alpha_c)/px + (one_py.T@alphap_y.T@alpha_c)/py + (one_px.T@alphap_x.T@alphap_y@one_py)/(p*p)   
+    weight_orth = weight_orth[0,0]
+
+    zx = U_ica@alpha_x
+    zy = U_ica@alpha_y
+    zc = U@alpha_c
     
-    zx = (zx - np.mean(zx)) / (np.std(zx))
-    zy = (zy - np.mean(zy)) / (np.std(zy))
-    zc = (zc - np.mean(zc)) / (np.std(zc))
-    
-    zxc = (zxc - np.mean(zxc)) / (np.std(zxc))
-    zyc = (zyc - np.mean(zyc)) / (np.std(zyc))
-    zcc = (zcc - np.mean(zcc)) / (np.std(zcc))
+    #zx = (zx - np.mean(zx)) / (np.std(zx))
+    #zy = (zy - np.mean(zy)) / (np.std(zy))
+    #zc = (zc - np.mean(zc)) / (np.std(zc))
+    #zx = np.array([stdrze(zx[:,i]) for i in range(zx.shape[1])]).T
+    #zy = np.array([stdrze(zy[:,i]) for i in range(zy.shape[1])]).T     
+
+    #zxc = (zxc - np.mean(zxc)) / (np.std(zxc))
+    #zyc = (zyc - np.mean(zyc)) / (np.std(zyc))
+    #zcc = (zcc - np.mean(zcc)) / (np.std(zcc))
+    #zxc = np.array([stdrze(zxc[:,i]) for i in range(zxc.shape[1])]).T
+    #zyc = np.array([stdrze(zyc[:,i]) for i in range(zyc.shape[1])]).T
 
     
     sig_x_h = np.exp(params["ln_sig_x_h"])
@@ -413,24 +397,46 @@ def loss_LNC(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
     sig_rx_h = np.exp(params["ln_sig_rx_h"])
     sig_ry_h = np.exp(params["ln_sig_ry_h"])
     
+    K_ax_h, K_ay_h, K_x_h, K_zx_h, K_zy_h, K_zc_h = kernel_mat_LNC_lin(D_x, x, zx, zy, zc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h)
+    n = K_ax_h.shape[0]
+    
+    
+    
+    
+    #X_x = zc
+    #X_xc = zcc
+    #X_y = np.hstack([x,zc])
+    #X_yc = np.hstack([x,zcc])
+
+    X_x = np.hstack([zx, zc])
+    X_xc = np.hstack([zxc, zcc]) 
+    X_x_cross = zy   
+
+    X_y = np.hstack([x,zy, zc])
+    X_yc = np.hstack([x,zyc, zcc])
+    X_y_cross = zx
+    
+    ws = np.ones(X_x.shape[1])
+    weights_x, resids_x, x_hat = rrModel(lam, X_x, x, ws)
+    _, _, xc_hat = rrModel(lam, X_xc, x, ws)
+    ws = np.ones(X_x_cross.shape[1])
+    _, _, x_cross_hat = rrModel(lam, X_x_cross, x, ws)
+    
+    ws = np.ones(X_y.shape[1])
+    weights_y, resids_y, y_hat = rrModel(lam, X_y, y, ws)
+    _, _, yc_hat = rrModel(lam, X_yc,  y, ws)
+    ws = np.ones(X_y_cross.shape[1])
+    _, _, y_cross_hat = rrModel(lam, X_y_cross, x, ws)
 
 
-    sig_x_f = np.exp(params["ln_sig_x_f"])
-    sig_zx_f = np.exp(params["ln_sig_zx_f"])
-    sig_zy_f = np.exp(params["ln_sig_zy_f"])
-    sig_zc_f = np.exp(params["ln_sig_zc_f"])
-    
-    
-    sigs_f = np.hstack([sig_x_f, sig_zx_f, sig_zy_f, sig_zc_f])
-    K_ax_f, K_ay_f, K_ax_h, K_ay_h, K_x_h, K_zx_h, K_zy_h, K_zc_h = kernel_mat_LNC(D_x, x, zx, zy, zc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h, sigs_f)
-    K_ax_fc, K_ay_fc, _, _, _, _, _, _ = kernel_mat_LNC(D_x, x, zxc, zyc, zcc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h, sigs_f)
-    n = K_ax_f.shape[0]
-    
-    weights_x, resids_x, x_hat = krrModel(lam, K_ax_f, x, ws)
-    _, _, xc_hat = krrModel(lam, K_ax_fc, x, ws)
-    
-    weights_y, _, resids_y, y_hat = krrModel_lin(lam, K_ay_f, x, y, ws)
-    _, _, _, yc_hat = krrModel_lin(lam, K_ay_fc, x, y, ws)
+    # stats for reg coeffs
+    ws = np.ones(X_x.shape[1])
+    stat_x = linRegCoefStat(np.array(0.00001), X_x, x, ws)
+    stat_x = stat_x[zx.shape[1]]
+    ws = np.ones(X_y.shape[1])
+    stat_y = linRegCoefStat(np.array(0.00001), X_y, y, ws)
+    stat_y = stat_y[zy.shape[1]+1]
+    statss = 1-(stat_x+stat_y)/100
     
     
     
@@ -455,18 +461,18 @@ def loss_LNC(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
 
     # indep causes: between (zx, zy, zc) and between zy and x
     hsic_zx_zy = hsic(K_zx_h, K_zy_h)
-    hsic_zx_zy = np.max(np.array([hsic_zx_zy, 0.02]))
+    #hsic_zx_zy = np.max(np.array([hsic_zx_zy, 0.02]))
     hsic_zx_zc = hsic(K_zx_h, K_zc_h)
-    hsic_zx_zc = np.max(np.array([hsic_zx_zc, 0.02]))
+    #hsic_zx_zc = np.max(np.array([hsic_zx_zc, 0.02]))
     hsic_zy_zc = hsic(K_zy_h, K_zc_h)
-    hsic_zy_zc = np.max(np.array([hsic_zy_zc, 0.02]))
+    #hsic_zy_zc = np.max(np.array([hsic_zy_zc, 0.02]))
     hsic_zy_x  = hsic(K_zy_h, K_x_h)
-    hsic_zy_x = np.max(np.array([hsic_zy_x, 0.02]))
+    #hsic_zy_x = np.max(np.array([hsic_zy_x, 0.02]))
     # conditional independence between zx and y given x.. gonna do this for the additive assumption here
     hsic_ry_zx = hsic(K_zx_h, K_ry_h)
-    hsic_ry_zx = np.max(np.array([hsic_ry_zx, 0.02]))
+    #hsic_ry_zx = np.max(np.array([hsic_ry_zx, 0.02]))
     
-    hsic_indep = np.log(hsic_zx_zy) + np.log(hsic_zx_zc) + np.log(hsic_zy_zc) + np.log(hsic_zy_x) + np.log(hsic_ry_zx)
+    hsic_indep =  np.log(hsic_zx_zc+0.02) + np.log(hsic_zy_zc+0.02) + np.log(hsic_zx_zy+0.02) + np.log(hsic_zy_x+0.02)   + np.log(hsic_ry_zx+0.02)
      
         
     # desirable hsics of x, y vs zc    
@@ -477,12 +483,17 @@ def loss_LNC(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
     # mse residual
     mse_rx = mse(x, x_hat)
     mse_ry = mse(y, y_hat)
+    mse_rx_cross = mse(x, x_cross_hat)
+    mse_rx_cross = np.min(np.array([mse_rx_cross, 1]))
+    mse_ry_cross = mse(y, y_cross_hat)
+    mse_ry_cross = np.min(np.array([mse_ry_cross, 1]))
     mse_rxc = mse(x, xc_hat)
     mse_ryc = mse(y, yc_hat)
     
     
-    mses = np.log(mse_rx) +  np.log(mse_ry) + np.log(mse_rxc) +  np.log(mse_ryc)
-    
+    mses = np.log(mse_rx) +  np.log(mse_ry)  - np.log(mse_rx_cross) -  np.log(mse_ry_cross) #+ np.log(mse_rxc) +  np.log(mse_ryc)
+    #mses = np.log(statss)    
+
     # CI condition
     
     # Zs size
@@ -495,30 +506,48 @@ def loss_LNC(params, pars, loss_data, ws, alpha_x, alpha_y, alpha_c):
     alphac_norm = np.dot(alpha_c.T, alpha_c)[1,1]
     
     # calcualte compute los
-    loss_value =  beta * mses  + neta*hsic_indep   + nu*z_norm - lu*hsic_xy_zc
+    loss_value =  beta * mses  + neta*hsic_indep   + nu*z_norm - lu*hsic_xy_zc + weight_orth
     
-    return loss_value[0,0]
+    #print("loss value dim: ", loss_value.shape)
+    
+    return loss_value[0]
 
-dloss_LNC = jax.grad(loss_LNC, )
-dloss_LNC_jitted = jax.jit(dloss_LNC)
+dloss_LNC_lin = jax.grad(loss_LNC_lin, )
+dloss_LNC_lin_jitted = jax.jit(dloss_LNC_lin)
 
 # for reporting purposes give back all terms separatley
 @jax.jit
-def model_LNC(params, lam, loss_data, K_t):
+def model_LNC_lin(params, lam, loss_data, K_t):
 
-    x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds = loss_data
+    
+    x, y, Z, U, U_ica,  K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds, idx_min, idx_x_c, idx_y_c, mixMat = loss_data
 
     alpha_x = params["alpha_x"]
     alpha_y = params["alpha_y"]
     alpha_c = params["alpha_c"]
+
+    alphap_x = mixMat@alpha_x
+    alphap_y = mixMat@alpha_y
     
-    zx = K_u@alpha_x
-    zy = K_u@alpha_y
-    zc = K_u@alpha_c
+    px = alpha_x.shape[1]
+    py = alpha_y.shape[1]
+    p = alpha_c.shape[0]
+    one_p = np.ones(p)[:,None]
+    one_px = np.ones(px)[:,None]
+    one_py = np.ones(py)[:,None] 
+    weight_orth = (one_px.T@alphap_x.T@alpha_c)/px + (one_py.T@alphap_y.T@alpha_c)/py + (one_px.T@alphap_x.T@alphap_y@one_py)/(p*p)
+    weight_orth = weight_orth[0,0]**2    
+
+    zx = U_ica@alpha_x
+    zy = U_ica@alpha_y
+    zc = U@alpha_c
+
     
-    zx = (zx - np.mean(zx)) / (np.std(zx))
-    zy = (zy - np.mean(zy)) / (np.std(zy))
-    zc = (zc - np.mean(zc)) / (np.std(zc))
+    #zx = (zx - np.mean(zx)) / (np.std(zx))
+    #zy = (zy - np.mean(zy)) / (np.std(zy))
+    #zc = (zc - np.mean(zc)) / (np.std(zc))
+    #zx = np.array([stdrze(zx[:,i]) for i in range(zx.shape[1])]).T
+    #zy = np.array([stdrze(zy[:,i]) for i in range(zy.shape[1])]).T
 
     
     sig_x_h = np.exp(params["ln_sig_x_h"])
@@ -528,26 +557,49 @@ def model_LNC(params, lam, loss_data, K_t):
     sig_rx_h = np.exp(params["ln_sig_rx_h"])
     sig_ry_h = np.exp(params["ln_sig_ry_h"])
     
-
-
-    sig_x_f = np.exp(params["ln_sig_x_f"])
-    sig_zx_f = np.exp(params["ln_sig_zx_f"])
-    sig_zy_f = np.exp(params["ln_sig_zy_f"])
-    sig_zc_f = np.exp(params["ln_sig_zc_f"])
     
     
-    sigs_f = np.hstack([sig_x_f, sig_zx_f, sig_zy_f, sig_zc_f])
-    K_ax_f, K_ay_f, K_ax_h, K_ay_h, K_x_h, K_zx_h, K_zy_h, K_zc_h = kernel_mat_LNC(D_x, x, zx, zy, zc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h, sigs_f) 
-    n = K_ax_f.shape[0]
+    K_ax_h, K_ay_h, K_x_h, K_zx_h, K_zy_h, K_zc_h = kernel_mat_LNC_lin(D_x, x, zx, zy, zc, sig_x_h, sig_zx_h, sig_zy_h, sig_zc_h) 
+    n = K_ax_h.shape[0]
 
-    ws = np.ones(n)
-    #weights_y, resids_y, y_hat = krrModel(lam, K_ay_f, y, ws)
-    weights_y, beta, resids_y, y_hat = krrModel_lin(lam, K_ay_f, x, y, ws)
-    _, beta_u, _, _ = krrModel_lin(lam, K_u, x, y, ws)
-    print("K_x.shape",K_x.shape)
-    _, beta_x, _, _ = krrModel_lin(lam, K_x, x, y, ws)
-    weights_x, resids_x, x_hat = krrModel(lam, K_ax_f, x, ws)
     
+    #X_x = zc
+    #X_y = np.hstack([x,zc])
+    
+    X_x = np.hstack([zx, zc])
+    X_y = np.hstack([x,zy, zc])
+    X_x_cross = zy   
+    X_y_cross = zx
+    
+    ws = np.ones(X_x_cross.shape[1])
+    _, _, x_cross_hat = rrModel(lam, X_x_cross, x, ws)
+    ws = np.ones(X_y_cross.shape[1])
+    _, _, y_cross_hat = rrModel(lam, X_y_cross, x, ws)
+
+
+    ws = np.ones(X_x.shape[1])
+    weights_x, resids_x, x_hat = rrModel(lam, X_x, x, ws)
+    ws = np.ones(X_y.shape[1])
+    weights_y, resids_y, y_hat = rrModel(lam, X_y, y, ws)
+    
+    ws = np.ones(x.shape[1])
+    beta_x, _, _ = rrModel(lam, x, y, ws)
+    ws = np.ones(U.shape[1])
+    beta_u, _, _ = rrModel(lam, U, y, ws)
+    
+    beta_ce = weights_y[0]
+    beta_x = beta_x[0]
+    beta_u = beta_u[0]
+
+    # stats for reg coeffs
+    ws = np.ones(X_x.shape[1])
+    stat_x = linRegCoefStat(np.array(0.00001), X_x, x, ws)
+    stat_x = stat_x[zx.shape[1]]
+    ws = np.ones(X_y.shape[1])
+    stat_y = linRegCoefStat(np.array(0.00001), X_y, y, ws)
+    stat_y = stat_y[zy.shape[1]+1]
+    
+        
     x_std, y_std = stds
 
     beta_ce = beta_ce/x_std*y_std
@@ -596,8 +648,13 @@ def model_LNC(params, lam, loss_data, K_t):
     # mse residual
     mse_rx = mse(x, x_hat)
     mse_ry = mse(y, y_hat)
-    mses = np.log(mse_rx) +  np.log(mse_ry)
+    mse_rx_cross = mse(x, x_cross_hat)
+    mse_rx_cross = np.min(np.array([mse_rx_cross, 1]))
+    mse_ry_cross = mse(y, y_cross_hat)
+    mse_ry_cross = np.min(np.array([mse_ry_cross, 1]))
 
+    mses = np.log(mse_rx) +  np.log(mse_ry) - np.log(mse_rx_cross) -  np.log(mse_ry_cross) #+ np.log(mse_rxc) +  np.log(mse_ryc)
+    
     
     
 
@@ -647,8 +704,13 @@ def model_LNC(params, lam, loss_data, K_t):
         'hsic_zy_x': hsic_zy_x,
         'hsic_ry_zx': hsic_ry_zx,
         'hsic_indep': hsic_indep,
+        'weight_orth': weight_orth,
         'mse_rx': mse_rx,
         'mse_ry': mse_ry,
+        'mse_rx_cross': mse_rx_cross,
+        'mse_ry_cross': mse_ry_cross,
+        'stat_x': stat_x,
+        'stat_y': stat_y,
         'mses': mses,
         'hsic_zx': hsic_zx,
         'hsic_zy': hsic_zy,
@@ -671,112 +733,7 @@ def model_LNC(params, lam, loss_data, K_t):
 
     return monitor
 
-@jax.jit
-def getParamsForGrad_LNC(params, rep, smpl):
-
-    
-    
-    ln_sig_x_h = params["ln_sig_x_h"][rep]
-    ln_sig_zx_h = params["ln_sig_zx_h"][rep]
-    ln_sig_zy_h = params["ln_sig_zy_h"][rep]
-    ln_sig_zc_h = params["ln_sig_zc_h"][rep]
-    ln_sig_rx_h = params["ln_sig_rx_h"][rep]
-    ln_sig_ry_h = params["ln_sig_ry_h"][rep]
-    
-
-
-    ln_sig_x_f = params["ln_sig_x_f"][rep]
-    ln_sig_zx_f = params["ln_sig_zx_f"][rep]
-    ln_sig_zy_f = params["ln_sig_zy_f"][rep]
-    ln_sig_zc_f = params["ln_sig_zc_f"][rep]
-    
-    
-  
-    params_aux = params.copy()
-
-    alpha_x = params["alpha_x"][:, rep]
-    alpha_y = params["alpha_y"][:, rep]
-    alpha_c = params["alpha_c"][:, rep]
-    alpha_x = alpha_x[:,None]
-    alpha_y = alpha_y[:,None]
-    alpha_c = alpha_c[:,None]
-    
-    
-    params_aux['alpha_x'] = alpha_x
-    params_aux['alpha_y'] = alpha_y
-    params_aux['alpha_c'] = alpha_c
-    
-    params_aux["ln_sig_x_h"] = ln_sig_x_h
-    params_aux["ln_sig_zx_h"] = ln_sig_zx_h
-    params_aux["ln_sig_zy_h"] = ln_sig_zy_h
-    params_aux["ln_sig_zc_h"] = ln_sig_zc_h
-    params_aux["ln_sig_rx_h"] = ln_sig_rx_h
-    params_aux["ln_sig_ry_h"] = ln_sig_ry_h
-    
-
-    params_aux["ln_sig_x_f"] = ln_sig_x_f
-    params_aux["ln_sig_zx_f"] = ln_sig_zx_f
-    params_aux["ln_sig_zy_f"] = ln_sig_zy_f
-    params_aux["ln_sig_zc_f"] = ln_sig_zc_f
-
-
-    return params_aux
-
-def updateParams_LNC(params, grad_params, smpl, iteration, rep, learning_rate):
-     
-    #idx_rows = smpl[:, None]
-    n = params['alpha_x'].shape[0]
-    idx_rows = np.linspace(0, n - 1, n, dtype=int)[:, None]
-    idx_cols = np.array(rep)[None, None]
-    idx = jax.ops.index[tuple([idx_rows, idx_cols])]
-    
-    #alpha_x
-    A = params['alpha_x'][tuple([idx_rows, idx_cols])]
-    B = learning_rate * grad_params['alpha_x']
-    params['alpha_x'] = index_update(params['alpha_x'], idx, A - B)
-    
-    #alpha_y
-    A = params['alpha_y'][tuple([idx_rows, idx_cols])]
-    B = learning_rate * grad_params['alpha_y']
-    params['alpha_y'] = index_update(params['alpha_y'], idx, A - B)
-    
-    #alpha_c
-    A = params['alpha_c'][tuple([idx_rows, idx_cols])]
-    B = learning_rate * grad_params['alpha_c']
-    params['alpha_c'] = index_update(params['alpha_c'], idx, A - B)
-    
-    gpars = [grad_params["ln_sig_x_h"],
-    grad_params["ln_sig_zx_h"],
-    grad_params["ln_sig_zy_h"],
-    grad_params["ln_sig_zc_h"],
-    grad_params["ln_sig_rx_h"],
-    grad_params["ln_sig_ry_h"],
-    grad_params["ln_sig_x_f"],
-    grad_params["ln_sig_zx_f"],
-    grad_params["ln_sig_zy_f"],
-    grad_params["ln_sig_zc_f"],
-    grad_params["ln_sig_x_h"],
-    grad_params["ln_sig_zx_h"],
-    grad_params["ln_sig_zy_h"],
-    grad_params["ln_sig_zc_h"],
-    grad_params["ln_sig_rx_h"],
-    grad_params["ln_sig_ry_h"],
-    grad_params["ln_sig_x_f"],
-    grad_params["ln_sig_zx_f"],
-    grad_params["ln_sig_zy_f"],
-    grad_params["ln_sig_zc_f"]]
-    
-
-    if (onp.sum(onp.isnan(B))!=0) | (onp.sum(onp.isinf(B))!=0) | (onp.sum(onp.isnan(gpars))!=0):
-        idx_nan, _ = onp.where(onp.isnan(B))
-        print("nans in grad Z, iteration: ", iteration, " rep: ", rep)
-        raise ValueError('Nans in gradient.')
-            
-    
-    
-    return None
-
-def getIniMonitor_LNC(epochs, report_freq, reps, parts): 
+def getIniMonitor_LNC_lin(epochs, report_freq, reps, parts): 
         num_reports = int(np.ceil(epochs / report_freq))+1 # initial report 
         print("num_reports: ", num_reports)
         monitors = {
@@ -790,12 +747,17 @@ def getIniMonitor_LNC(epochs, report_freq, reps, parts):
             'hsic_zy_x': onp.zeros([num_reports, reps, parts]),
             'hsic_ry_zx': onp.zeros([num_reports, reps, parts]),
             'hsic_indep': onp.zeros([num_reports, reps, parts]),
+            'weight_orth': onp.zeros([num_reports, reps, parts]),	
             'hsic_x_zc': onp.zeros([num_reports, reps, parts]),
             'hsic_y_zc': onp.zeros([num_reports, reps, parts]),
             'hsic_xy_zc': onp.zeros([num_reports, reps, parts]),
             'mse_rx': onp.zeros([num_reports, reps, parts]),
             'mse_ry': onp.zeros([num_reports, reps, parts]),
+            'mse_rx_cross': onp.zeros([num_reports, reps, parts]),
+            'mse_ry_cross': onp.zeros([num_reports, reps, parts]),
             'mses': onp.zeros([num_reports, reps, parts]),
+            'stat_x': onp.zeros([num_reports, reps, parts]),
+            'stat_y': onp.zeros([num_reports, reps, parts]),
             'corr_zc': onp.zeros([num_reports, reps, parts]),
             'hsic_zx': onp.zeros([num_reports, reps, parts]),
             'hsic_zy': onp.zeros([num_reports, reps, parts]),
@@ -814,19 +776,22 @@ def getIniMonitor_LNC(epochs, report_freq, reps, parts):
         }
         return monitors
 
-def fillMonitor_LNC(params, params_or, pars, loss_as_par, dloss_as_par_jitted, lossData, iteration, report_freq, rep, part, reps, monitors, K_t):
+
+                    
+def fillMonitor_LNC_lin(params, params_or, pars, loss_as_par, dloss_as_par_jitted, lossData, iteration, report_freq, rep, part, reps, monitors, K_t):
     
-    
+    print("enters filMonitor_LNC_lin")
     _, _, lam, _,_ = pars
           
     
-    monitor = model_LNC(params, lam, lossData, K_t)
+    monitor = model_LNC_lin(params, lam, lossData, K_t)
     print("monitor")
     print(monitor)
     ws = np.ones(params["alpha_x"].shape[0])
     loss_val = loss_as_par(params, pars, lossData,ws, params["alpha_x"], params["alpha_y"], params["alpha_c"])
     indxRep = int(iteration / report_freq) 
     print("indxRep:", indxRep, " iteration: ", iteration, " rep: ", rep, " part: ", part)
+    
     
     monitors['loss'][indxRep, rep, part] = loss_val
     #monitors['hsic_rx_ax'][indxRep, rep, part] = monitor['hsic_rx_ax']
@@ -843,7 +808,11 @@ def fillMonitor_LNC(params, params_or, pars, loss_as_par, dloss_as_par_jitted, l
     monitors['hsic_xy_zc'][indxRep, rep, part] = monitor['hsic_xy_zc']
     monitors['mse_rx'][indxRep, rep, part] = monitor['mse_rx']
     monitors['mse_ry'][indxRep, rep, part] = monitor['mse_ry']
+    monitors['mse_rx_cross'][indxRep, rep, part]= monitor['mse_rx_cross']
+    monitors['mse_ry_cross'][indxRep, rep, part]= monitor['mse_ry_cross']
     monitors['mses'][indxRep, rep, part] = monitor['mses']
+    monitors['stat_x'][indxRep, rep, part] = monitor['stat_x']
+    monitors['stat_y'][indxRep, rep, part] = monitor['stat_y']
     monitors['hsic_zx'][indxRep, rep, part] = monitor['hsic_zx']
     monitors['hsic_zy'][indxRep, rep, part] = monitor['hsic_zy']
     monitors['hsic_zc'][indxRep, rep, part] = monitor['hsic_zc']
@@ -861,19 +830,21 @@ def fillMonitor_LNC(params, params_or, pars, loss_as_par, dloss_as_par_jitted, l
     
     
     
-                    
+    print("exits filMonitor_LNC_lin")                
                     
     return monitors
 
-
-def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, epochs, report_freq, reps, batch_size, batch_per_epoch, learning_rate, smplsParts, monitors, batches, batches2, K_t):
-    N = params["alpha_x"].shape[0]
+def getLatentZ_LNC_lin(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, epochs, report_freq, reps, batch_size, batch_per_epoch, learning_rate, smplsParts, monitors, batches, batches2, K_t):
+    x, _, _, _, _, _, _, _, _, _, _, _, _,_,_,_,_ = loss_data
+    
+    N = x.shape[0]
+    p = params["alpha_x"].shape[0]
          
     print("report_freq: ", report_freq)
     parts = len(smplsParts)
     
-    ms = onp.zeros([N, epochs+1, reps])
-    vs = onp.zeros([N, epochs+1, reps])
+    ms = onp.zeros([p, epochs+1, reps])
+    vs = onp.zeros([p, epochs+1, reps])
     epochs2 = int(onp.floor(epochs/batch_per_epoch))
     loss_vals = onp.ones([epochs+1, reps])*onp.Inf
     loss_vals_epoch = onp.ones([epochs2, reps])*onp.Inf
@@ -933,12 +904,12 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
             #smpl = onp.random.choice(a=n, size=batch_size, replace=False)
 
   
-            loss_data_aux = getDataLoss_LNC(smpl, loss_data)
-            loss_data_aux2 = getDataLoss_LNC(smpl2, loss_data)
+            loss_data_aux = getDataLoss_LNC_lin(smpl, loss_data)
+            loss_data_aux2 = getDataLoss_LNC_lin(smpl2, loss_data)
 
   
             # equal weights
-            ws = np.ones(batch_size)
+            ws = np.ones(2)
             
 
             # algorithmic independence forcing
@@ -951,8 +922,8 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
             # prepare parameters for grad calculation (subsample)
             
             #params_aux = getParamsForGrad(params, rep, optType, smpl)
-            params_aux = getParamsForGrad_LNC(params, rep, smpl)
-            params_aux2 = getParamsForGrad_LNC(params, rep, smpl2)
+            params_aux = getParamsForGrad_LNC_lin(params, rep, smpl)
+            params_aux2 = getParamsForGrad_LNC_lin(params, rep, smpl2)
             #params_aux3 = getParamsForGrad(params, rep, smpl3)
            
             
@@ -962,7 +933,7 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
                 if iteration > 0:
                     m = ms[smpl,iteration-1,rep][:,None]
                     v = vs[smpl,iteration-1,rep][:,None]
-                    m, v = updateParamsAdam2_LNC(params, grad_params, smpl, iteration, rep, lrs[rep], iteration-1, m, v)
+                    m, v = updateParamsAdam2_LNC_lin(params, grad_params, smpl, iteration, rep, lrs[rep], iteration-1, m, v)
                     ms[smpl,iteration,rep] = m[:,0]
                     vs[smpl,iteration,rep] = v[:,0]
             
@@ -970,8 +941,8 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
             else:
                 grad_params = dloss_as_par_jitted(params_aux, pars, loss_data_aux, ws, params_aux["alpha_x"], params_aux["alpha_y"], params_aux["alpha_c"])
                 if iteration > 0:
-                    updateParams_LNC(params, grad_params, smpl, iteration, rep, lrs[rep])
-
+                    updateParams_LNC_lin(params, grad_params, smpl, iteration, rep, lrs[rep])
+                    
             ws = np.ones(batch_size*2)
             loss_vals[iteration, rep] = loss_as_par(params_aux2, pars, loss_data_aux2, ws, params_aux["alpha_x"], params_aux["alpha_y"], params_aux["alpha_c"])
             	
@@ -984,10 +955,10 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
                 for part in range(parts):
                     
                     smplPart = smplsParts[part]
-                    params_part = getParamsForGrad_LNC(params, rep, smplPart)
+                    params_part = getParamsForGrad_LNC_lin(params, rep, smplPart)
                     #params_part = getParamsSmpl(params, smplPart)
-                    loss_data_part = getDataLoss_LNC(smplPart, loss_data)
-                    monitors = fillMonitor_LNC(params_part, params, pars, loss_as_par, dloss_as_par_jitted, loss_data_part, iteration, report_freq, rep, part, reps, monitors, K_t)
+                    loss_data_part = getDataLoss_LNC_lin(smplPart, loss_data)
+                    monitors = fillMonitor_LNC_lin(params_part, params, pars, loss_as_par, dloss_as_par_jitted, loss_data_part, iteration, report_freq, rep, part, reps, monitors, K_t)
                                
 
                     #nPerPart = smplPart.shape[0]
@@ -995,27 +966,14 @@ def getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data, pars, ep
                     #loss_val = loss_as_par(params_part, pars, loss_data_part, ws)
          
                               
-                  
-   
+    
     return params, monitors #, resids, bestResids, bestZ
 
 
-def get_batches_one_epoch(batch_per_epoch, batch_size, n):
-    #batches_one_epoch = onp.random.choice(batch_per_epoch, size=n) # equal expected number of points
-    batches_one_epoch = onp.random.choice(n, size=n, replace=False)//batch_size # equal number of points
-    #batches_one_epoch = onp.random.choice(n, size=n, replace=True)//batch_size # equal number of expected points
-    batches_one_epoch = [myWhere(batches_one_epoch == i) for i in range(batch_per_epoch)]
-    if len(batches_one_epoch[len(batches_one_epoch)-1]):
-        comple = batch_size - len(batches_one_epoch[len(batches_one_epoch)-1])
-        batches_one_epoch[len(batches_one_epoch)-1] = np.hstack([batches_one_epoch[len(batches_one_epoch)-1], np.array(onp.random.randint(low=0, high=n, size=comple))])
-    return batches_one_epoch
-
-
-def getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, report_freq, num_reps, batch_size, learning_rate, job):
+def getLatentZ_wrapper_lin(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, report_freq, num_reps, batch_size, learning_rate, job):
     print("nm:", nm)
     N = x.shape[0]
     
-
     D_x = covariance_matrix(sqeuclidean_distance, x, x)
     sigma_x_med = 1 / np.median(D_x)
     K_x = rbf_kernel_matrix({'gamma': sigma_x_med}, x, x)
@@ -1028,7 +986,57 @@ def getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, 
     sigma_u = 1 / np.median(D_u)
     K_u = rbf_kernel_matrix({'gamma': sigma_u}, U, U)
     
-    
+    numComps = onp.min([Z.shape[1], Z.shape[0]-3])
+    transformer = FastICA(n_components=numComps,random_state=0,whiten='unit-variance')
+    U_ica = transformer.fit_transform(onp.array(U))
+    print("U_ica shape: ", U_ica.shape)
+    mixMat = transformer.components_
+    mixMat  = mixMat.T
+    pvalsy = [sm.OLS(onp.array(y), sm.add_constant(onp.hstack([x, U_ica[:,i][:,None]]))).fit().pvalues[2] for i in range(U_ica.shape[1])]
+    pvalsx = [sm.OLS(onp.array(x), sm.add_constant(U_ica[:,i][:,None])).fit().pvalues[1] for i in range(U_ica.shape[1])]
+    pvals = np.array([pvalsx, pvalsy])
+    sumpvals = onp.apply_along_axis(np.sum, 0, pvals)
+    indx_min = onp.argmin(sumpvals)
+    print("indx_min: ", indx_min)
+    idx_rest  = list(set(onp.arange(0, U_ica.shape[1])).difference(set([indx_min])))
+    print("idx_rest: ", idx_rest)
+    modMat_aux = sm.add_constant(onp.hstack([x, U_ica[:,indx_min][:,None] ,U_ica[:,idx_rest]] ))
+    numRows = modMat_aux.shape[0]
+    maxCols = onp.min([numRows, modMat_aux.shape[1]])
+    #modMat_aux = modMat_aux[:, 0:maxCols]
+    print("modMat shape: ", modMat_aux.shape)
+    pvals_resty = sm.OLS(onp.array(y), modMat_aux).fit().pvalues
+    pvals_resty = pvals_resty[3:(pvals_resty.shape[0])]
+    modMat_aux = sm.add_constant(onp.hstack([U_ica[:,indx_min][:,None], U_ica[:,idx_rest]] ))
+    numRows = modMat_aux.shape[0]
+    maxCols = onp.min([numRows, modMat_aux.shape[1]])
+    #modMat_aux = modMat_aux[:, 0:maxCols]
+    print("modMat shape: ", modMat_aux.shape)
+    pvals_restx = sm.OLS(onp.array(x), modMat_aux).fit().pvalues
+    pvals_restx = pvals_restx[2:(pvals_restx.shape[0])]
+
+    print("pvals_resty: ", pvals_resty)
+    print("pvals_restx: ", pvals_restx)
+    idx_y_c, = onp.where( (pvals_resty<pvals_restx)&(pvals_resty<0.05))
+    idx_y_c = onp.array(idx_rest)[idx_y_c]
+    if idx_y_c.shape[0]==0:
+        idx_y_c, = onp.where( (pvals_resty<pvals_restx))
+        idx_y_c = onp.array(idx_rest)[idx_y_c]
+    if idx_y_c.shape[0]==0:
+        idx_y_c = onp.argsort(pvals_resty)[0:2]
+        idx_y_c = onp.array(idx_rest)[idx_y_c]
+
+    print("idx_y_c: ", idx_y_c)
+    idx_x_c, = onp.where( (pvals_resty>pvals_restx)&(pvals_restx<0.05))
+    idx_x_c = onp.array(idx_rest)[idx_x_c]
+    if idx_x_c.shape[0]==0:
+        idx_x_c, = onp.where( (pvals_resty>pvals_restx))
+        idx_x_c = onp.array(idx_rest)[idx_x_c]
+    if idx_x_c.shape[0]==0:
+        idx_x_c = onp.argsort(pvals_restx)[0:2]
+        idx_x_c = onp.array(idx_rest)[idx_x_c]
+    print("idx_x_c: ", idx_x_c)
+
     onp.random.seed(seed=job)
     
     maxMonitor = 1000
@@ -1037,13 +1045,14 @@ def getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, 
     
 
     smplsParts = [myWhere(smplsParts==i) for i in range(parts)]
+    #print("smplsParts: ", smplsParts)
 
-    lossData = x, y, Z, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds 
     
+    lossData = x, y, Z, U, U_ica, K_u, D_x, K_y, D_y, K_x, idxs, beta_real, stds, indx_min, idx_x_c, idx_y_c, mixMat
     
 
     onp.random.seed(seed=job+3)
-    params = getIniPar_LNC(num_reps, lossData, pars, smplsParts)
+    params = getIniPar_LNC_lin(num_reps, lossData, pars, smplsParts)
     print("alpha x shape: ",params["alpha_x"].shape)
     
     res = []
@@ -1066,23 +1075,24 @@ def getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, 
 
     report_freq2 = num_iters // 1
 
-    path = getIniMonitor_LNC(num_iters, report_freq, num_reps, parts)
+    path = getIniMonitor_LNC_lin(num_iters, report_freq, num_reps, parts)
     
 
 
-    loss_as_par = loss_LNC
-    dloss_as_par_jitted = dloss_LNC_jitted
+    loss_as_par = loss_LNC_lin
+    dloss_as_par_jitted = dloss_LNC_lin_jitted
     
 
         
         
     start = time.process_time()
-    params, path = getLatentZ_LNC(params, loss_as_par, dloss_as_par_jitted, loss_data=lossData, pars=pars,epochs=num_iters, report_freq=report_freq,
+    params, path = getLatentZ_LNC_lin(params, loss_as_par, dloss_as_par_jitted, loss_data=lossData, pars=pars,epochs=num_iters, report_freq=report_freq,
                                                          reps=num_reps, batch_size=batch_size, batch_per_epoch=batch_per_epoch, learning_rate=learning_rate, smplsParts=smplsParts, monitors=path, batches=batches, batches2=batches2, K_t=None)
     res.append(path)
     
     res = {k: onp.concatenate([r[k] for r in res], axis=0) for k in res[0].keys()}
     
+    params["zc"] = U@params["alpha_c"]
 
     print("results")
     res = {"params": params, "path": res}
@@ -1090,6 +1100,11 @@ def getLatentZ_wrapper(x, y, Z, U, idxs, stds, beta_real, nm, pars, num_epochs, 
     
 
     return res
+
+
+
+
+
 
 
 

@@ -72,6 +72,6 @@ def getDataSetTab(repos, pars):
         datasetTab2[par] = [p for f in files for p in combos[par]]
 
     datasetTab2 = pd.DataFrame.from_dict(datasetTab2)
-    datasetTab2 = datasetTab2.merge(aux, on="fileNames")
+    datasetTab2 = datasetTab2.merge(aux, on="fileNames", sort=True)
     datasetTab2["job"] = onp.arange(1, datasetTab2.shape[0]+1)
     return datasetTab2
