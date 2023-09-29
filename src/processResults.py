@@ -75,3 +75,43 @@ def getDataSetTab(repos, pars):
     datasetTab2 = datasetTab2.merge(aux, on="fileNames", sort=True)
     datasetTab2["job"] = onp.arange(1, datasetTab2.shape[0]+1)
     return datasetTab2
+
+def readGetMsrs(folder, file, job):
+    if int(job) % 5000 == 0: 
+        print("job: ", job)
+    pathFile = folder+file+"_"+job+".pkl"
+    if not os.path.isfile(pathFile):
+        return None
+    res = pickle5.load( open(pathFile, "rb" ) )
+    n = res["Z"]["path"]["loss"].shape[0]-1
+    df = {k:[res["Z"]["path"][k][n,0,0]] for k in res["Z"]["path"].keys()}
+    msrs = pd.DataFrame(df)
+    
+    
+    def convPars(x):
+        if type(x) == onp.ndarray:
+            res = onp.round(x, 6)[0]
+        else:
+            res = x
+        return res
+
+    
+    parsJob = res["pars"]
+    parsJob = {k: convPars(parsJob[k]) for k in parsJob.keys()}
+    for k in parsJob.keys():
+        msrs[k] = parsJob[k]
+    
+    dataInfo = res["dataInfo"]
+    for k in dataInfo.keys():
+        msrs[k] = dataInfo[k]
+
+    keepMeta = ["rep","latents","confounder","proxy","dist","distsd","noise","noisesd","independent","noiseproxy","ncl","size"]
+    dataInfo = res["meta"]
+    for k in keepMeta:
+        msrs[k] = dataInfo[k]
+        
+        
+    
+    
+    return msrs
+
