@@ -1,5 +1,7 @@
 # confoundIt_py
-python proxy confounder factorization gradient descent (PCF-GD) code
+python "proxy confounder factorization gradient descent (PCF-GD)" code
+PCF-GD method described in manuscript "Recovering latent confounders from high-dimensional
+proxy variables"
 
 The src folder includes the following files:
 - funcs_LNC.py: functions to run non-linear version of PCF-GD
